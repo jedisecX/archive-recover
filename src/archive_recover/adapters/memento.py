@@ -1,26 +1,36 @@
-"""Memento TimeMap adapter for standards-based discovery.
+"""Memento TimeMap adapter for standards-based discovery (RFC 7089).
 
-Uses RFC 7089 TimeMap (application/link-format) where archives expose it.
-Internet Archive: https://web.archive.org/web/timemap/link/{url}
-Other Memento-compliant archives similarly.
-
-Useful for known URLs; less efficient for domain-wide than CDX.
+Queries per-URL TimeMaps (``application/link-format``) on one or more
+Memento-compliant archives. Default: Internet Archive.
+Useful for known URLs; domain-wide discovery needs a seed list.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Optional
-import re
+from urllib.parse import quote, urlsplit
 
-import httpx
+from archive_recover.core.http import FetchError
 
 from .base import BaseAdapter, CaptureRecord, DiscoveryResult
+from .wayback import wayback_raw_url
+
+DEFAULT_TIMEMAPS = {
+    "ia": "https://web.archive.org/web/timemap/link/{url}",
+}
 
 
 class MementoAdapter(BaseAdapter):
     name = "memento"
-    base_url = "https://web.archive.org"  # default; configurable per archive
+    base_url = "https://web.archive.org"
+
+    def __init__(self, *args: Any, timemaps: Optional[dict[str, str]] = None, **kwargs: Any) -> None:
+        self.timemaps = dict(timemaps or DEFAULT_TIMEMAPS)
+        # Only the archives we query (and their memento hosts) may be fetched.
+        hosts = {urlsplit(t.format(url="x")).hostname for t in self.timemaps.values()}
+        self.allowed_hosts = tuple(sorted(h for h in hosts if h))
+        super().__init__(*args, **kwargs)
 
     def supports_domain_enumeration(self) -> bool:
         return False  # TimeMaps are per-URL
@@ -28,8 +38,8 @@ class MementoAdapter(BaseAdapter):
     def limitations(self) -> str:
         return (
             "Per-URL TimeMaps only. Efficient for known URLs across participating archives. "
-            "Domain-wide requires external URL lists. Aggregators (e.g. former TimeTravel) "
-            "may be slow or unavailable."
+            "Domain-wide requires external URL lists (--seeds). Aggregators (e.g. former "
+            "TimeTravel) may be slow or unavailable."
         )
 
     async def discover(
@@ -42,52 +52,50 @@ class MementoAdapter(BaseAdapter):
         seed_urls: Optional[list[str]] = None,
         resume_key: Optional[str] = None,
         limit: int = 1000,
+        include_subdomains: bool = True,
     ) -> DiscoveryResult:
         if not seed_urls:
             return DiscoveryResult(
-                captures=[],
-                complete=True,
+                captures=[], complete=True,
                 source_notes="Memento TimeMaps require seed URLs; domain enumeration not supported.",
             )
-
+        # resume_key = index of the next seed to query
+        start = int(resume_key) if resume_key and resume_key.isdigit() else 0
         captures: list[CaptureRecord] = []
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            for url in seed_urls[:50]:  # conservative
-                timemap_url = f"https://web.archive.org/web/timemap/link/{url}"
+        errors: list[str] = []
+        i = start
+        for i in range(start, len(seed_urls)):
+            url = seed_urls[i]
+            for label, template in self.timemaps.items():
+                tm_url = template.format(url=quote(url, safe=":/?&=%+@,;~!$*'()"))
                 try:
-                    resp = await client.get(timemap_url)
-                    if resp.status_code != 200:
-                        continue
-                    # Very simple link-format parser
-                    for line in resp.text.splitlines():
-                        m = re.search(r'<([^>]+)>;\s*rel="[^"]*memento[^"]*"', line, re.I)
-                        if m:
-                            memento_uri = m.group(1)
-                            dt_match = re.search(r'datetime="([^"]+)"', line)
-                            captures.append(
-                                CaptureRecord(
-                                    original_url=url,
-                                    snapshot_url=memento_uri,
-                                    timestamp_str=dt_match.group(1) if dt_match else None,
-                                    source=self.name,
-                                    extra={"timemap": True},
-                                )
-                            )
-                            if len(captures) >= limit:
-                                break
-                except Exception:
+                    recs = await self._timemap_captures(
+                        tm_url, url, since=since, until=until, limit=limit - len(captures)
+                    )
+                except FetchError as exc:
+                    errors.append(f"{label} {url}: {exc}")
                     continue
-
-        return DiscoveryResult(captures=captures, complete=True, source_notes="Parsed IA TimeMap")
+                for r in recs:
+                    r.extra["archive"] = label
+                captures.extend(recs)
+            if len(captures) >= limit:
+                break
+        next_index = i + 1
+        more = next_index < len(seed_urls)
+        return DiscoveryResult(
+            captures=captures,
+            next_resume_key=str(next_index) if more else None,
+            complete=not more and not errors,
+            error="; ".join(errors[:5]) + (f" (+{len(errors) - 5} more)" if len(errors) > 5 else "")
+            if errors else None,
+            source_notes=f"TimeMaps from {', '.join(self.timemaps)}",
+        )
 
     async def retrieve(self, capture: CaptureRecord) -> tuple[bytes, dict[str, Any]]:
-        # Delegate to snapshot URL
         if not capture.snapshot_url:
             raise ValueError("No memento URI")
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
-            resp = await client.get(capture.snapshot_url)
-            return resp.content, {
-                "status_code": resp.status_code,
-                "headers": dict(resp.headers),
-                "final_url": str(resp.url),
-            }
+        url = capture.snapshot_url
+        if urlsplit(url).hostname == "web.archive.org":
+            url = wayback_raw_url(url)
+        res = await self.fetcher.get(url)
+        return res.content, self._meta(res, raw_url=url)

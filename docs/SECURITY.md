@@ -4,15 +4,18 @@ This tool is designed for lawful archival recovery of publicly available histori
 
 ## Protections Implemented
 
-- Request timeouts and configurable rate limits with exponential backoff + jitter
-- Descriptive user-agent
-- Safe URL parsing; rejection of localhost, private IPs, and non-HTTP(S) schemes (SSRF protection)
-- Path traversal protection on local filesystem writes and reconstruction
-- File size and total storage limits
-- MIME / signature checks where feasible
-- No execution of recovered JavaScript, binaries, or macros
-- Sensitive values redacted from structured logs
-- Dry-run and metadata-only modes
+- Request timeouts; per-host rate limiting; exponential backoff + jitter; `Retry-After` honored
+- Descriptive user-agent (override with `--user-agent`, include contact info for heavy use)
+- SSRF protection: only http(s); loopback, private, link-local (169.254/metadata), CGNAT,
+  reserved, IPv4-mapped IPv6 and integer-encoded hosts rejected; credentials in URLs rejected
+- Per-adapter host allowlist, enforced on the initial request **and every redirect hop**
+- Adapters never fall back to fetching the live original site
+- Path traversal protection on object storage and reconstruction (`safe_join`)
+- Per-object byte cap (streamed, aborted early) and total storage budget
+- Recovered JavaScript is never executed; reconstruction neutralizes `<script>` and inline
+  `on*` handlers by default (`--keep-scripts` to opt out)
+- Anti-bot challenges detected and reported; a source is paused after repeated pushback
+- Metadata-only mode (`metadata_only: true`); `discover` never downloads payloads
 
 ## Explicit Non-Goals
 

@@ -1,77 +1,108 @@
 # Universal Web Archive Recovery & Reconstruction Engine
 
-Production-grade tool for discovering, indexing, downloading, verifying, and reconstructing archived web content from:
+Discover, download, verify and rebuild archived web content from:
 
-- **Internet Archive (Wayback Machine)** — full CDX API support
-- **archive.today / archive.is** — conservative discovery (no stable public bulk API)
-- **Megalodon.jp** — Japanese on-demand archive with limited programmatic access
-- **Memento TimeMaps** — standards-based cross-archive discovery where available
+- **Internet Archive (Wayback Machine)** — full CDX enumeration with real `resumeKey` pagination
+- **archive.today / archive.is** — seed-based (snapshot links, or originals via Memento TimeMap)
+- **Megalodon.jp** — seed-based (known snapshot URLs)
+- **Memento TimeMaps** — standards-based per-URL discovery (RFC 7089)
 
 ## Key Principles
 
-- **Lawful & conservative**: No CAPTCHA bypass, no rate-limit evasion, no anti-automation circumvention.
-- **Resumable & durable**: SQLite-backed jobs, checkpoints, atomic writes.
-- **Honest reporting**: Distinguishes discoverable vs. retrieved vs. referenced vs. historically complete.
-- **Security-conscious**: SSRF protection, path traversal guards, untrusted input handling, size limits.
-- **Modular adapters**: Independent source adapters so one failure does not block others.
+- **Lawful & conservative**: no CAPTCHA bypass, no rate-limit evasion. Challenge pages are detected and reported; a source that keeps pushing back is paused for the run.
+- **Never fetches the live site**: retrieval only ever hits archive hosts.
+- **Resumable & durable**: SQLite state, per-page discovery checkpoints, per-capture commits, atomic file writes.
+- **Honest reporting**: discovered vs. recovered vs. metadata-only vs. failed are reported separately; "Discovery complete within the configured scope" only appears when the source's enumeration actually terminated.
+- **Security-conscious**: per-adapter host allowlists enforced on every redirect hop, private/loopback/metadata IPs blocked, path-traversal-safe writes, per-object and total byte limits, recovered scripts neutralized in reconstructions.
 
 ## Installation
 
 ```bash
 cd archive-recover
 python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+source .venv/bin/activate            # .venv\Scripts\activate on Windows
 pip install -e ".[dev]"
 ```
 
-Supported Python: 3.11+
+Python 3.11+. Termux works (`pkg install python libxml2 libxslt` first for lxml).
 
 ## Quick Start
 
 ```bash
-# Discover captures for a domain (metadata only recommended first)
-archive-recover discover --domain example.com --sources wayback --metadata-only
+# 1. Index every Wayback capture of the host (metadata only, no payloads)
+archive-recover discover --domain example.com --sources wayback --collapse digest
 
-# Full recovery (respects rate limits)
-archive-recover recover --domain example.com --sources wayback --max-concurrency 2
+# 2. Download payloads (raw id_ bytes), HTML+CSS+images first
+archive-recover recover --domain example.com --types html,css,images --max-concurrency 2
 
-# Resume interrupted job
-archive-recover recover --domain example.com --resume
+# 3. Interrupted? Just run it again — it continues where it stopped
+archive-recover recover --domain example.com
 
-# Generate coverage report
-archive-recover report --domain example.com
+# 4. Integrity + coverage
+archive-recover verify  --domain example.com
+archive-recover report  --domain example.com          # writes report.json + report.md
 
-# Reconstruct browsable static site (optional)
+# 5. Browsable static copy (latest captures, or --at 2015-06-01)
 archive-recover reconstruct --domain example.com
 ```
 
-See `docs/` for detailed usage, security notes, and limitations.
+Seed-based sources take a URL list (one per line, `#` comments, `-` for stdin):
+
+```bash
+archive-recover discover --domain example.com --sources memento,archiveis,megalodon --seeds urls.txt
+```
+
+All settings can live in a YAML file (`config/example.yaml`) and be overridden on the command line:
+
+```bash
+archive-recover --config config/example.yaml discover
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `discover` | Query sources, store captures in SQLite (deduplicated, scope-filtered). Resumes from the last checkpoint; `--fresh` restarts. `--max-pages N` for incremental runs. |
+| `recover` | Download pending captures. Retries transient errors with backoff (honors `Retry-After`), skips already-stored identical payloads by digest, enforces storage budget, caps attempts per capture. |
+| `verify` | Re-hash stored objects against recorded SHA-256. `--fix` requeues missing/corrupt ones. |
+| `reconcile` | `verify --fix` + requeue retriable failures. |
+| `report` | Coverage/integrity report (Markdown + JSON, `--json` to stdout). |
+| `reconstruct` | Static site under `<output>/<domain>/site/` with links rewritten to local files; `_index.html` lists pages and referenced-but-missing URLs. |
+| `status` | Counts by source/status, recent jobs. |
+| `sources` | Adapters and their limitations. |
+
+## Output layout
+
+```
+recovered/<domain>/
+├── objects/ab/ab12…            # content-addressed payloads (SHA-256), deduplicated
+├── report.json, report.md
+└── site/                       # reconstruct output
+    ├── _index.html, _manifest.json
+    └── example.com/index.html …
+```
+
+Wayback payloads are checked against the CDX digest (base32 SHA-1); matches are marked `verified`.
 
 ## Limitations (Source-Imposed)
 
 | Source | Domain-wide enumeration | Public API | Notes |
 |--------|--------------------------|------------|-------|
-| Wayback | Excellent (CDX `matchType=domain`) | Yes | Rate-limited free tier; use responsibly |
-| archive.is | Poor | No | Form-based search, frequent challenges; seed-URL or manual workflow only |
-| Megalodon | Limited | No | On-demand; search via gyo.tc / known patterns; Japanese encoding handling |
-| Memento | Good for known URLs | TimeMap | Aggregators may be slow or discontinued (e.g. TimeTravel) |
+| Wayback | Excellent (CDX `matchType=host`/`domain`) | Yes | Rate-limited free tier; use responsibly |
+| archive.is | No | TimeMap only | Frequent challenges; seed URLs only |
+| Megalodon | No | No | Snapshot-URL seeds; others kept as metadata with a gyo.tc hint |
+| Memento | Per known URL | TimeMap | Aggregators may be slow or discontinued |
 
-The system never claims exhaustive historical coverage. "Discovery complete within configured scope" is used only when the implemented interfaces terminate under the given rules.
+The system never claims exhaustive historical coverage.
 
-## Project Structure
+## Development
 
+```bash
+pytest            # 66 tests, fully offline (archive endpoints are mocked with httpx.MockTransport)
 ```
-src/archive_recover/
-├── adapters/       # Source-specific discovery & retrieval
-├── core/           # DB, queue, verification, reconstruction
-├── cli.py          # Click CLI
-└── ...
-```
+
+See `docs/` for security notes, validation matrix and troubleshooting. Attribution in `docs/ATTRIBUTION.md`.
 
 ## License
 
-See LICENSE. Attributions for archive interfaces and Memento RFC 7089 are documented in docs/ATTRIBUTION.md.
-
-## Validation Matrix
-
-See `docs/VALIDATION.md` for which adapters, operations, and tests were verified vs. mocked.
+See LICENSE.
