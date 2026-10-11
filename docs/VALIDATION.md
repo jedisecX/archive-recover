@@ -1,19 +1,23 @@
 # Validation Matrix
 
-| Component | Unit Tests | Integration (live) | Notes |
-|-----------|------------|--------------------|-------|
-| URL normalization | Planned / fixture-based | N/A | IDN, www, http/https, redirects |
-| Wayback CDX adapter | Mocked responses | Optional public query | Pagination, field parsing |
-| archive.is adapter | Mocked | Limited (known snapshots only) | No bulk enumeration claimed |
-| Megalodon adapter | Mocked | Limited | Seed-based |
-| Memento TimeMap | Mocked link-format | Optional IA TimeMap | Per-URL |
-| SQLite schema & migrations | Planned | N/A | Versioned |
-| Checkpoint / resume | Planned | N/A | Interruption simulation |
-| Hash verification | Planned | N/A | SHA-256 of recovered bytes |
-| Path traversal / SSRF | Planned | N/A | Defensive tests |
-| Reconstruction link rewrite | Planned | N/A | Safe rewriting only |
-| Reporting accuracy | Planned | N/A | Distinguishes discovery vs retrieval |
+All tests run offline: archive endpoints are served by `tests/conftest.py::FakeArchive`
+through `httpx.MockTransport`, reproducing CDX JSON (+ resumeKey trailer), `id_` replay
+headers, link-format TimeMaps, 429/503 responses, challenge pages and hostile redirects.
 
-**Status**: Core adapters and schema implemented. Full test suite and production hardening are incremental next steps. Live integration tests are not required for unit correctness and are run only when permitted.
+| Component | Tests | Live | Notes |
+|-----------|-------|------|-------|
+| URL normalization (www, ports, IDN, query order, https→http) | `test_core.py` | N/A | |
+| SSRF guard + host allowlist (loopback, 169.254, mapped IPv6, CGNAT, int hosts, creds) | `test_core.py`, redirect test in `test_adapters.py` | N/A | Checked on every redirect hop |
+| Wayback CDX parse + pagination + params | `test_adapters.py` | Not run (blocked) | |
+| Wayback retrieval (`id_`, archived 404, 503 retry, size cap) | `test_adapters.py` | Not run | |
+| Memento TimeMap (parser, limit, 404 = zero captures) | `test_core.py`, `test_adapters.py` | Not run | |
+| archive.is (host detection, TimeMap 429, challenge, no live fetch) | `test_adapters.py` | Not run | |
+| Megalodon (snapshot parsing, Japanese paths, no live fetch) | `test_adapters.py` | Not run | |
+| Schema constraints + v0.1.0 migration | `test_core.py` | N/A | |
+| Discovery persistence, dedupe, scope, resume | `test_pipeline.py` | N/A | |
+| Recovery: dedupe, digest verify, failures, type filter, storage cap, circuit breaker | `test_pipeline.py` | N/A | |
+| verify / reconcile (tamper detection, requeue) | `test_pipeline.py` | N/A | |
+| Reconstruction (link rewrite, replay unwrap, srcset, CSS, charset, script neutralizing, `--at`) | `test_pipeline.py` | N/A | |
+| Full CLI run | `test_pipeline.py::test_cli_end_to_end` | N/A | |
 
 No fabricated successful downloads or capture counts.
