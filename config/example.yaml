@@ -1,0 +1,22 @@
+# Example configuration
+domain: example.com
+output_dir: ./recovered
+db_path: archive_recover.db
+sources:
+  - wayback
+  - memento
+max_concurrency: 2
+rate_limit_delay: 1.5
+max_storage_bytes: 10737418240  # 10 GiB
+retrieve_types:
+  - html
+  - css
+  - js
+  - images
+  - documents
+include_subdomains: false
+date_range:
+  since: "2020-01-01"
+  until: null
+metadata_only: false
+user_agent: "archive-recover/0.1.0 (research; contact@example.com)"
